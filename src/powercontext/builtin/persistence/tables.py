@@ -1015,6 +1015,33 @@ MEMORY_ENTRY_HEADS_TABLE = Table(
 
 MEMORY_TABLES = (MEMORY_ENTRY_VERSIONS_TABLE, MEMORY_ENTRY_HEADS_TABLE)
 
+# Source-lifecycle dependency graph. Source nodes carry their authoritative
+# ``available`` toggle and monotonic ``last_sequence``; derived memory/topic nodes
+# store their evidence reference and parent policy. The whole scope's graph is
+# loaded and recomputed together, so no adjacency table is needed.
+SOURCE_LIFECYCLE_NODES_TABLE = Table(
+    "pc_source_lifecycle_nodes",
+    SHARED_METADATA,
+    Column("scope_id", identity_string(MAX_SCOPE_ID_LENGTH), primary_key=True),
+    Column("node_id", identity_string(MAX_SOURCE_ID_LENGTH), primary_key=True),
+    Column("family", identity_string(16), nullable=False),
+    Column("reference", _canonical_payload_type(), nullable=False),
+    Column("parents", _canonical_payload_type(), nullable=False),
+    Column("policy", identity_string(8), nullable=False),
+    Column("revision", Integer),
+    Column("available", Boolean),
+    Column("last_sequence", BigInteger),
+    ForeignKeyConstraint(("scope_id",), ("pc_scopes.scope_id",), ondelete="CASCADE"),
+    CheckConstraint(
+        "family IN ('source', 'memory', 'topic')",
+        name="ck_pc_source_lifecycle_family",
+    ),
+    CheckConstraint(
+        "policy IN ('source', 'all', 'any')",
+        name="ck_pc_source_lifecycle_policy",
+    ),
+)
+
 TOPIC_MEMORY_TABLES = (
     TOPIC_MEMORY_RETRIEVAL_SHAPE_TABLE,
     TOPIC_MEMORY_REVISION_PUBLICATIONS_TABLE,
@@ -1185,6 +1212,7 @@ BUILTIN_TABLES = (
     + SHARED_TABLES
     + TOPIC_MEMORY_TABLES
     + MEMORY_TABLES
+    + (SOURCE_LIFECYCLE_NODES_TABLE,)
     + STATISTICS_TABLES
     + RECURRENCE_TABLES
     + (ARTIFACT_TAGS_TABLE, DREAM_RUNS_TABLE, RECEIPT_MIGRATION_REVIEW_TABLE)

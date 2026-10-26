@@ -139,6 +139,7 @@ from powercontext.builtin.inference import (
 from powercontext.builtin.inference.models import InferenceUsage
 from powercontext.builtin.inference.usage import bind_usage_reporter
 from powercontext.builtin.persistence.agent_skill_targets import RemoteAgentSkillTarget
+from powercontext.builtin.persistence.database import AsyncDatabase
 from powercontext.builtin.persistence.artifact_governance import (
     ArtifactGovernance,
     ArtifactLifecycleState,
@@ -168,6 +169,7 @@ from powercontext.builtin.runtime._scope_cache import (
 )
 from powercontext.builtin.runtime.decision_model import DecisionModel
 from powercontext.builtin.runtime.errors import InvalidRuntimeRequestError, TopicMemoryProcessingUnavailableError
+from powercontext.builtin.runtime.source_lifecycle import SourceLifecycleApplication
 from powercontext.builtin.runtime.models import (
     ApproveArtifactCandidateRequest,
     CaptureSource,
@@ -846,6 +848,16 @@ class ScopedContextApplication:
             if authorize_scopes is not None:
                 await authorize_scopes((self.scope_id, *scope.context_references))
             return await self._prepare(request, scope)
+
+    async def prepare_incremental(self, request: PrepareContextRequest, /, *, base_pack=None):
+        """Prepare this round's context as a full pack, or a delta against ``base_pack``."""
+        from powercontext.builtin.runtime.context_pack import ContextPack, ContextPackDelta
+
+        prepared = await self.prepare(request)
+        target = ContextPack.from_content(prepared.content or "", chunk_bytes=512)
+        if base_pack is None:
+            return target
+        return ContextPackDelta.between(base_pack, target)
 
     async def _prepare(self, request: PrepareContextRequest, scope: ScopeDescriptor, /) -> PreparedContext:
         build, effort = await self._prepare_build(request, scope)
@@ -2667,6 +2679,13 @@ class ScopedTopicMemoryApplication:
                     query_embedding,
                     embedding_timeout_seconds,
                 )
+        inactive_topics = await self._runtime.lifecycle.for_scope(self.scope_id).inactive_topic_refs()
+        if inactive_topics:
+            result = result.model_copy(
+                update={
+                    "hits": tuple(hit for hit in result.hits if hit.artifact_ref not in inactive_topics)
+                }
+            )
         observer = self._runtime._topic_memory_search_observer
         if observer is not None:
             try:
@@ -3027,6 +3046,7 @@ class BuiltinRuntime:
         remote_ingestion: RemoteIngestion | None = None,
         dream_service: DreamService | None = None,
         generation_concurrency: int = 4,
+        database: AsyncDatabase | None = None,
     ) -> None:
         if source_window_limit < 1:
             raise _RuntimeConfigurationError("source_window_limit")
@@ -3084,6 +3104,7 @@ class BuiltinRuntime:
         self._scheduled_experience_runner = scheduled_experience_runner
         self.source_window_limit = source_window_limit
         self.context_assembly_max_entries = context_assembly_max_entries
+        self._database = database
         self.recall_sufficiency_policy = recall_sufficiency_policy
         self._scope_cache = ScopeCache(
             scope_cache_size,
@@ -3109,6 +3130,7 @@ class BuiltinRuntime:
         self.handoff = HandoffApplication(self)
         self.work = WorkApplication(self)
         self.memory = MemoryApplication(self)
+        self.lifecycle = SourceLifecycleApplication(self)
         self.topic_memory = TopicMemoryApplication(self)
         self.records = RecordApplication(self)
         self.prompts = PromptApplication(self)
