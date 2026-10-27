@@ -44,7 +44,7 @@ _Reference = SourceRef | MemoryCitation | ArtifactRef
 _Policy = Literal["all", "any"]
 
 
-class SourceLifecycleError(Exception):
+class SourceLifecycleError(ValueError):
     """A Source lifecycle event, registration, or resolution was rejected."""
 
 
@@ -64,6 +64,13 @@ class SourceLifecycleEvent(BaseModel):
     def _validate_node_id(cls, value: str) -> str:
         if not value or value != value.strip():
             raise ValueError("node_id must be a non-empty trimmed string")
+        return value
+
+    @field_validator("reason")
+    @classmethod
+    def _validate_reason(cls, value: str) -> str:
+        if not value or value != value.strip():
+            raise ValueError("reason must be a non-empty trimmed string")
         return value
 
 
@@ -199,12 +206,16 @@ class ScopedSourceLifecycle:
             normalized_parents: tuple[str, ...] = ()
         else:
             normalized_parents = tuple(parents)
-            if not normalized_parents and policy == "any":
-                raise SourceLifecycleError("a node with 'any' policy requires at least one parent")
+            if not normalized_parents:
+                raise SourceLifecycleError("a derived node requires at least one parent")
+            if len(set(normalized_parents)) != len(normalized_parents):
+                raise SourceLifecycleError("a node's parents must be unique")
         async with self._database.transaction() as connection:
             existing = await self._load(connection)
             if node_id in existing:
-                raise SourceLifecycleError(f"node already registered: {node_id}")
+                if self._same_binding(existing[node_id], family, reference, normalized_parents, policy, revision):
+                    return
+                raise SourceLifecycleError(f"node already registered with a different binding: {node_id}")
             if self._creates_cycle(node_id, normalized_parents, existing):
                 raise SourceLifecycleError(f"registration would create a dependency cycle: {node_id}")
             missing = [parent for parent in normalized_parents if parent not in existing]
@@ -245,6 +256,25 @@ class ScopedSourceLifecycle:
                     stack.extend(ancestor.parents)
         return False
 
+    @staticmethod
+    def _same_binding(
+        node: _LifecycleNode,
+        family: str,
+        reference: _Reference,
+        parents: tuple[str, ...],
+        policy: str,
+        revision: int | None,
+    ) -> bool:
+        """Return True when re-registering ``node_id`` carries the identical binding."""
+
+        return (
+            node.family == family
+            and node.parents == tuple(parents)
+            and node.policy == policy
+            and node.revision == revision
+            and node.reference == reference
+        )
+
     async def apply(self, event: SourceLifecycleEvent, /) -> list[str]:
         async with self._runtime._scope_operation(self.scope_id):
             async with self._runtime._locked(self.scope_id):
@@ -259,31 +289,30 @@ class ScopedSourceLifecycle:
                     if event.sequence < last_sequence:
                         raise SourceLifecycleError("event sequence is older than the last applied sequence")
                     if event.sequence == last_sequence:
-                        if event.available == node.available:
-                            return sorted(self._active_nodes(nodes))
-                        raise SourceLifecycleError("event sequence is already applied with a different availability")
-                    old_active = self._active_nodes(nodes)
-                    nodes[event.node_id] = _LifecycleNode(
-                        node_id=node.node_id,
-                        family=node.family,
-                        reference=node.reference,
-                        parents=node.parents,
-                        policy=node.policy,
-                        revision=node.revision,
-                        available=event.available,
-                        last_sequence=event.sequence,
-                    )
-                    await connection.execute(
-                        update(SOURCE_LIFECYCLE_NODES_TABLE)
-                        .where(
-                            SOURCE_LIFECYCLE_NODES_TABLE.c.scope_id == self.scope_id,
-                            SOURCE_LIFECYCLE_NODES_TABLE.c.node_id == event.node_id,
+                        if event.available != node.available:
+                            raise SourceLifecycleError("event sequence is already applied with a different availability")
+                    else:
+                        nodes[event.node_id] = _LifecycleNode(
+                            node_id=node.node_id,
+                            family=node.family,
+                            reference=node.reference,
+                            parents=node.parents,
+                            policy=node.policy,
+                            revision=node.revision,
+                            available=event.available,
+                            last_sequence=event.sequence,
                         )
-                        .values(available=event.available, last_sequence=event.sequence)
-                    )
-                    new_active = self._active_nodes(nodes)
-                await self._toggle_memory(nodes, old_active, new_active)
-                return sorted(new_active)
+                        await connection.execute(
+                            update(SOURCE_LIFECYCLE_NODES_TABLE)
+                            .where(
+                                SOURCE_LIFECYCLE_NODES_TABLE.c.scope_id == self.scope_id,
+                                SOURCE_LIFECYCLE_NODES_TABLE.c.node_id == event.node_id,
+                            )
+                            .values(available=event.available, last_sequence=event.sequence)
+                        )
+                    target = self._active_nodes(nodes)
+                await self._reconcile_memory(nodes, target)
+                return sorted(target)
 
     async def resolve(self, node_id: str, /, *, purpose: str) -> _Reference:
         if purpose not in {"generation", "audit"}:
@@ -326,21 +355,23 @@ class ScopedSourceLifecycle:
 
         return {node_id for node_id in nodes if is_active(node_id)}
 
-    async def _toggle_memory(
+    async def _reconcile_memory(
         self,
         nodes: dict[str, _LifecycleNode],
-        old_active: set[str],
-        new_active: set[str],
+        active: set[str],
     ) -> None:
+        """Bring every Memory entry's stored state in line with its node's activity.
+
+        ``forget`` and ``reactivate`` are idempotent at the Memory service level, so this
+        reconciliation is safe to repeat after a partial failure: entries already in the
+        target state produce no change and therefore no new revision.
+        """
+
         deactivate = sorted(
-            node_id
-            for node_id in old_active - new_active
-            if nodes[node_id].family == "memory"
+            node_id for node_id, node in nodes.items() if node.family == "memory" and node_id not in active
         )
         reactivate = sorted(
-            node_id
-            for node_id in new_active - old_active
-            if nodes[node_id].family == "memory"
+            node_id for node_id, node in nodes.items() if node.family == "memory" and node_id in active
         )
         await self._apply_memory_transition(nodes, deactivate_ids=deactivate, reactivate_ids=reactivate)
 

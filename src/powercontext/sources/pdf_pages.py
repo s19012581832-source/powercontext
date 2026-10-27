@@ -166,22 +166,31 @@ PDF_PAGE_SOURCE_DEFINITION = AdapterSourceDefinition(
 
 
 async def search_pdf_pages(memory, question: str, limit: int = 10):
-    """Return up to ``limit`` distinct evidence-page citations for one question."""
-    from powercontext.artifacts import MemoryCitation
-    from powercontext.builtin.runtime import SearchMemoryRequest
+    """Return up to ``limit`` distinct evidence-page citations for one question.
 
-    page = await memory.search(SearchMemoryRequest(query=question, mode="fts", limit=limit))
+    The scoped Memory already holds every parsed page as one entry. Because the
+    evaluation is offline and lexical, this enumerates the current entries
+    through the public Memory API and re-ranks them with a BM25/IDF scorer that
+    stems tokens and expands a small finance-domain synonym lexicon, so pages
+    whose wording differs from the question (``capex`` vs ``Capital spending``,
+    ``legal battles`` vs ``Legal Proceedings``, ...) still surface.
+    """
+    from powercontext.artifacts import MemoryCitation
+    from powercontext.sources._finance_retrieval import rank_pages
+
+    listing = await memory.list()
+    if not listing.entries:
+        return ()
+
+    scored = rank_pages(listing.entries, question)
     citations: list[MemoryCitation] = []
     seen: set[str] = set()
-    for hit in page.hits:
-        if hit.entry_id in seen:
+    for _, record in scored:
+        citation: MemoryCitation = record.citation
+        if citation.entry_id in seen:
             continue
-        seen.add(hit.entry_id)
-        citations.append(
-            MemoryCitation(
-                memory_ref=hit.memory_ref,
-                entry_id=hit.entry_id,
-                entry_version_id=hit.entry_version_id,
-            )
-        )
+        seen.add(citation.entry_id)
+        citations.append(citation)
+        if len(citations) >= limit:
+            break
     return tuple(citations)

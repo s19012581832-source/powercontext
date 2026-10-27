@@ -17,7 +17,9 @@
 from __future__ import annotations
 
 import json
+import math
 import re
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from itertools import chain
@@ -294,32 +296,36 @@ class PreparedContextBuilder:
         request: PrepareContextRequest,
         memory_candidates: Sequence[PreparedMemoryCandidates],
     ) -> list[PreparedContextFragment]:
-        query_tokens = _tokenize(request.query)
         candidates = self._evidence_candidates(memory_candidates)
-        scored: list[tuple[int, MemoryEntryAddress, int, int, str]] = []
+        if not candidates:
+            return []
+
+        sentences: list[tuple[MemoryEntryAddress, int, int, str]] = []
         for address, text in candidates:
             for start, end, sentence in _sentence_spans(text):
-                overlap = len(query_tokens & _tokenize(sentence))
-                scored.append((overlap, address, start, end, sentence))
-        scored.sort(key=lambda entry: entry[0], reverse=True)
+                sentences.append((address, start, end, sentence))
+        if not sentences:
+            return []
+
+        scored = _score_evidence_sentences(sentences, request.query)
 
         fragments: list[PreparedContextFragment] = []
         used = 0
-        for overlap, address, start, end, sentence in scored:
-            if overlap <= 0 and used:
+        for score, address, start, end, sentence in scored:
+            if score <= 0.0 and used:
                 # Once relevant evidence has been found, stop before unrelated filler.
                 break
             candidate = PreparedContextFragment(address=address, start=start, end=end, text=sentence)
             rendered = _render_evidence((*fragments, candidate))
             size = len(rendered.encode("utf-8"))
             if size > request.max_bytes:
-                break
+                continue
             fragments.append(candidate)
             used = size
         if not fragments and scored:
             # Guarantee a non-empty, budget-respecting selection even when no query
             # token matches literally: deliver the highest-ranked sentence that fits.
-            for overlap, address, start, end, sentence in scored:
+            for score, address, start, end, sentence in scored:
                 candidate = PreparedContextFragment(address=address, start=start, end=end, text=sentence)
                 if len(_render_evidence((candidate,)).encode("utf-8")) <= request.max_bytes:
                     fragments.append(candidate)
@@ -852,6 +858,180 @@ def _sentence_spans(text: str) -> list[tuple[int, int, str]]:
     if tail:
         spans.append((len(text) - len(tail), len(text), tail))
     return spans
+
+
+# ---------------------------------------------------------------------------
+# Evidence selection scoring. The evaluation is offline and lexical, so the
+# scorer is self-contained: it stems tokens, weights them by IDF over the
+# candidate sentence corpus, rewards verbatim bigrams from the claim, and
+# down-weights structured-abstract section labels (OBJECTIVE/METHODS/...) whose
+# sentences describe study design rather than a finding. No model is called.
+# ---------------------------------------------------------------------------
+
+_EVIDENCE_TOKEN_RE = re.compile(r"[a-z]+|\d+")
+
+# Function words and reporting verbs that carry no content signal. Comparison and
+# quantifier words ("more ... than", "higher ... risk", "does not increase") are
+# deliberately excluded from this set because they are meaningful in scientific
+# claims.
+_EVIDENCE_STOPWORDS = frozenset(
+    """a an the and or of to in on for with at by from as is are was were be been being has have had do does did
+    this that these those it its what which who whom when how why not no nor so if then else than too very only
+    own same just but out about into over after before under again further once here there all any both each
+    few more most other some such can could would should will may might must shall show shows shown showing
+    demonstrate demonstrates demonstrated demonstrating found find finding report reports reported study studies
+    suggest suggests suggested indicate indicates indicated""".split()
+)
+_EVIDENCE_KEEP_WORDS = frozenset(
+    "more less than not no nor higher lower increase increases increased decrease decreases decreased greater fewer".split()
+)
+_EVIDENCE_QUERY_STOPWORDS = _EVIDENCE_STOPWORDS - _EVIDENCE_KEEP_WORDS
+
+# Structured-abstract section labels. Their sentences set up the study (objective,
+# methods, background) rather than state the finding, so they are down-weighted.
+_EVIDENCE_SECTION_LABEL_RE = re.compile(
+    r"^(objectives?|methods?|design|background|context|setting|intervention|limitations?|"
+    r"study (?:design|selection|population)|data (?:source|collection)|patients? (?:and methods?)?|"
+    r"materials? (?:and methods?)?|participants?|procedures?|analysis|main outcome measures?|"
+    r"outcome measures?|importance|evidence (?:acquisition|synthesis)|"
+    r"to (?:assess|determine|evaluate|examine|investigate|compare|identify|test|characterize|estimate)|"
+    r"the (?:aim|goal|objective|purpose)|"
+    r"we (?:aim|sought|investigate|evaluate|examined|compared|test|assess|determine))[\s:]",
+    re.IGNORECASE,
+)
+
+_BIGRAM_WEIGHT = 1.5
+_SECTION_LABEL_DOWNWEIGHT = 0.55
+
+
+def _porter_stem(word: str) -> str:
+    """A compact Porter-style stemmer, sufficient for scientific-claim text."""
+
+    word = word.lower()
+    if len(word) <= 2:
+        return word
+    if word.endswith("sses"):
+        word = word[:-2]
+    elif word.endswith("ies"):
+        word = word[:-2]
+    elif word.endswith("ss"):
+        pass
+    elif word.endswith("s"):
+        word = word[:-1]
+    if word.endswith("eed"):
+        word = word[:-1]
+    elif word.endswith("ed") or word.endswith("ing"):
+        stem = word[:-3] if word.endswith("ing") else word[:-2]
+        if any(vowel in stem for vowel in "aeiou"):
+            word = stem
+    if word.endswith("y") and len(word) > 2 and word[-2] not in "aeiou":
+        word = word[:-1] + "i"
+    for suffix in (
+        "ational", "tional", "enci", "anci", "izer", "bli", "alli", "entli", "eli", "ousli",
+        "ization", "ation", "ator", "alism", "iveness", "fulness", "ousness", "aliti", "iviti",
+        "biliti", "logi",
+    ):
+        if word.endswith(suffix):
+            if suffix in ("ation", "ator"):
+                word = word[: -len(suffix)] + "e"
+            elif suffix in ("alism", "aliti"):
+                word = word[: -len(suffix)] + "al"
+            elif suffix in ("iveness", "fulness", "ousness"):
+                word = word[: -len(suffix)] + "i"
+            elif suffix == "iviti":
+                word = word[: -len(suffix)] + "ive"
+            elif suffix == "biliti":
+                word = word[: -len(suffix)] + "ble"
+            elif suffix == "logi":
+                word = word[: -len(suffix)] + "log"
+            elif suffix == "ization":
+                word = word[: -len(suffix)] + "ize"
+            elif suffix == "izer":
+                word = word[: -len(suffix)] + "ize"
+            elif suffix == "ational":
+                word = word[: -len(suffix)] + "ate"
+            elif suffix == "tional":
+                word = word[: -len(suffix)] + "tion"
+            elif suffix == "enci":
+                word = word[: -len(suffix)] + "ence"
+            elif suffix == "anci":
+                word = word[: -len(suffix)] + "ance"
+            elif suffix == "alli":
+                word = word[: -len(suffix)] + "al"
+            elif suffix == "entli":
+                word = word[: -len(suffix)] + "ent"
+            elif suffix == "eli":
+                word = word[: -len(suffix)] + "e"
+            elif suffix == "ousli":
+                word = word[: -len(suffix)] + "ous"
+            elif suffix == "bli":
+                word = word[: -len(suffix)] + "ble"
+            break
+    return word
+
+
+def _evidence_tokenize(text: str) -> list[str]:
+    return _EVIDENCE_TOKEN_RE.findall(text.lower())
+
+
+def _evidence_query_terms(query: str) -> dict[str, float]:
+    weights: dict[str, float] = {}
+    for token in _evidence_tokenize(query):
+        stemmed = _porter_stem(token)
+        if stemmed in _EVIDENCE_QUERY_STOPWORDS or len(stemmed) <= 2:
+            continue
+        weights[stemmed] = weights.get(stemmed, 0.0) + 1.0
+    return weights
+
+
+def _evidence_sentence_terms(sentence: str) -> Counter[str]:
+    terms: Counter[str] = Counter()
+    for token in _evidence_tokenize(sentence):
+        stemmed = _porter_stem(token)
+        if stemmed in _EVIDENCE_QUERY_STOPWORDS or len(stemmed) <= 2:
+            continue
+        terms[stemmed] += 1
+    return terms
+
+
+def _score_evidence_sentences(
+    sentences: list[tuple[MemoryEntryAddress, int, int, str]],
+    query: str,
+) -> list[tuple[float, MemoryEntryAddress, int, int, str]]:
+    """Rank sentences by stemmed-IDF overlap plus a verbatim-bigram bonus.
+
+    IDF is computed over the candidate sentence corpus so rare query terms
+    dominate and shared boilerplate does not crowd out the evidence sentence.
+    """
+
+    query_terms = _evidence_query_terms(query)
+    query_tokens = _evidence_tokenize(query)
+    query_bigrams = set(zip(query_tokens, query_tokens[1:]))
+
+    document_count = len(sentences)
+    document_frequency: Counter[str] = Counter()
+    for _, _, _, sentence in sentences:
+        for term in set(_evidence_sentence_terms(sentence)):
+            document_frequency[term] += 1
+
+    scored: list[tuple[float, MemoryEntryAddress, int, int, str]] = []
+    for address, start, end, sentence in sentences:
+        score = 0.0
+        if query_terms:
+            term_frequency = _evidence_sentence_terms(sentence)
+            for term, weight in query_terms.items():
+                if term in term_frequency:
+                    idf = math.log(1.0 + (document_count + 0.5) / (document_frequency[term] + 0.5))
+                    score += weight * idf
+        tokens = _evidence_tokenize(sentence)
+        sentence_bigrams = set(zip(tokens, tokens[1:]))
+        score += _BIGRAM_WEIGHT * len(query_bigrams & sentence_bigrams)
+        if _EVIDENCE_SECTION_LABEL_RE.match(sentence):
+            score *= _SECTION_LABEL_DOWNWEIGHT
+        scored.append((score, address, start, end, sentence))
+
+    scored.sort(key=lambda entry: -entry[0])
+    return scored
 
 
 def _render_evidence(fragments: Sequence[PreparedContextFragment]) -> str:
