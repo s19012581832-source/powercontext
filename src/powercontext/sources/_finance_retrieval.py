@@ -62,7 +62,7 @@ _STOPWORDS = frozenset(
     more most other some such s t d ll re ve m don can could would should will may might must shall
     give response respond question answer assume assuming perspective investment analyst use used using only
     details shown within statement statements rely relying relied calculate define defined outline outlined
-    state amount quantity reported report directly explicitly ongoing materially primarily unadjusted less margin
+    state amount quantity reported report directly explicitly
     as the a an of in on for with by and or""".split()
 )
 
@@ -70,7 +70,7 @@ _STOPWORDS = frozenset(
 _QUERY_DROP_WORDS = frozenset(
     """give response respond question answer assume assuming perspective investment analyst use used using only
     can details shown within statement statements rely relying relied calculate define defined outline outlined
-    state amount quantity reported report directly explicitly ongoing materially primarily unadjusted less margin
+    state amount quantity reported report directly explicitly
     above below accordingly additionally also although always among annually approximately as at because before
     between both but by during each either especially etc example excluding finally following from further
     generally however if include including indeed instead least let likely mainly moreover namely neither
@@ -84,6 +84,14 @@ _QUERY_DROP_WORDS = frozenset(
 # report is likely to use instead. Weights favour the original question terms
 # over expanded ones, so the expansions refine rather than dominate ranking.
 _SYNONYM_WEIGHT = 0.6
+# Bonus added per adjacent bigram (phrase) of the question that also appears
+# adjacently on a page, scaled by the two terms' IDF. This is what surfaces the
+# page carrying "capital expenditures" for a "capital expenditure" question when
+# the single words alone scatter across many pages.
+_BIGRAM_WEIGHT = 1.5
+# Flat score bonus when the question names a financial statement ("shown in the
+# cash flow statement") and a page's header carries that statement title.
+_STATEMENT_BOOST = 8.0
 _FINANCE_SYNONYMS: dict[str, tuple[str, ...]] = {
     "capex": ("capital", "expenditure", "expenditures", "spending"),
     "ebitda": ("operating", "income", "depreciation", "amortization", "profit"),
@@ -120,6 +128,9 @@ _FINANCE_SYNONYMS: dict[str, tuple[str, ...]] = {
     "d&a": ("depreciation", "amortization"),
     "inventory": ("inventories", "stock"),
     "shareholders": ("stockholders", "shareholders"),
+    # "product categories / service categories" in a revenue question almost
+    # always means the business-segment breakdown disclosed in the segment note.
+    "categori": ("segment", "segments"),
 }
 
 
@@ -231,6 +242,108 @@ def _expand_query(question: str) -> dict[str, float]:
     return weights
 
 
+def _query_stem_sequence(question: str) -> list[str]:
+    """Ordered stemmed content tokens of the question, for bigram matching."""
+
+    sentences = re.split(r"(?<=[.!?])\s+", question)
+    kept = [s for s in sentences if not _INSTRUCTION_SENTENCE_RE.search(s.lower().strip())]
+    query = " ".join(kept) if kept else question
+
+    stems: list[str] = []
+    for token in _tokenize(query):
+        if token in _QUERY_DROP_WORDS or (len(token) == 1 and not token.isdigit()):
+            continue
+        stemmed = _porter_stem(token)
+        if stemmed in _STOPWORDS or len(stemmed) <= 1:
+            continue
+        stems.append(stemmed)
+    return stems
+
+
+# Headers that identify the income statement across reporting conventions
+# ("statement of income", "statement of operations", "statement of earnings",
+# "statement of comprehensive income").
+_INCOME_STATEMENT_HEADERS: tuple[str, ...] = (
+    "statement of income",
+    "statement of operations",
+    "statement of earnings",
+    "statement of comprehensive income",
+)
+
+# (question hint, page-header substrings, boost). When the question names either
+# a statement directly ("shown in the cash flow statement") or a metric whose
+# line items live on a specific statement ("quick ratio", "gross margin",
+# "EBITDA", "capital-intensive", "DPO"), the pages carrying that statement's
+# header are the evidence pages almost by definition. Hints are matched against
+# the question; the named headers are then looked for in the page's opening
+# lines.
+_STATEMENT_HINTS: tuple[tuple[str, tuple[str, ...], float], ...] = (
+    # -- explicit statement names --
+    ("cash flow", ("statement of cash flow", "cash flow"), _STATEMENT_BOOST),
+    ("balance sheet", ("balance sheet",), _STATEMENT_BOOST),
+    ("income statement", _INCOME_STATEMENT_HEADERS, _STATEMENT_BOOST),
+    ("statement of operations", _INCOME_STATEMENT_HEADERS, _STATEMENT_BOOST),
+    ("statement of income", _INCOME_STATEMENT_HEADERS, _STATEMENT_BOOST),
+    ("statement of earnings", _INCOME_STATEMENT_HEADERS, _STATEMENT_BOOST),
+    ("statement of comprehensive income", _INCOME_STATEMENT_HEADERS, _STATEMENT_BOOST),
+    # -- metric concepts computed from statement line items --
+    (
+        "capital intensive",
+        _INCOME_STATEMENT_HEADERS + ("balance sheet", "statement of cash flow"),
+        _STATEMENT_BOOST,
+    ),
+    (
+        "capital-intensive",
+        _INCOME_STATEMENT_HEADERS + ("balance sheet", "statement of cash flow"),
+        _STATEMENT_BOOST,
+    ),
+    ("gross margin", _INCOME_STATEMENT_HEADERS, _STATEMENT_BOOST),
+    ("ebitda", _INCOME_STATEMENT_HEADERS + ("statement of cash flow",), _STATEMENT_BOOST),
+    ("quick ratio", ("balance sheet",), _STATEMENT_BOOST),
+    ("current ratio", ("balance sheet",), _STATEMENT_BOOST),
+    ("liquidity", ("balance sheet",), _STATEMENT_BOOST),
+    ("dpo", _INCOME_STATEMENT_HEADERS + ("balance sheet",), _STATEMENT_BOOST),
+    ("days payable", _INCOME_STATEMENT_HEADERS + ("balance sheet",), _STATEMENT_BOOST),
+    ("days sales outstanding", _INCOME_STATEMENT_HEADERS + ("balance sheet",), _STATEMENT_BOOST),
+    ("days inventory", _INCOME_STATEMENT_HEADERS + ("balance sheet",), _STATEMENT_BOOST),
+    ("free cash flow", ("statement of cash flow",), _STATEMENT_BOOST),
+    ("year-over-year", _INCOME_STATEMENT_HEADERS, _STATEMENT_BOOST),
+)
+
+
+def _header_hit(page_head: str, header: str) -> bool:
+    """Match ``header`` inside ``page_head``, tolerating singular/plural forms.
+
+    Report headings are inconsistent ("Consolidated Statement of Income" vs
+    "Consolidated Statements of Operations", "Balance Sheet" vs "Balance
+    Sheets"), so each word of the header is matched with an optional trailing
+    ``s`` (``statements?``, ``sheets?``, ``flows?``).
+    """
+
+    pattern = r"\b" + r"\s+".join(re.escape(word) + r"s?" for word in header.lower().split()) + r"\b"
+    return re.search(pattern, page_head.lower()) is not None
+
+
+def _statement_boost(question: str, page_head: str) -> float:
+    """Return the statement-targeting bonus for one page, if any.
+
+    Every hint that appears in the question is checked against the page's
+    header, and the strongest matching boost wins (a page is one statement, so
+    multiple hints that all point at the same statement must not stack).
+    """
+
+    lowered = question.lower()
+    best = 0.0
+    for hint, headers, boost in _STATEMENT_HINTS:
+        if hint in lowered:
+            for header in headers:
+                if _header_hit(page_head, header):
+                    if boost > best:
+                        best = boost
+                    break
+    return best
+
+
 def rank_pages(records: Iterable[object], question: str, /) -> list[tuple[float, object]]:
     """Rank Memory entry records by BM25 relevance to ``question``.
 
@@ -243,6 +356,8 @@ def rank_pages(records: Iterable[object], question: str, /) -> list[tuple[float,
         return []
 
     query_terms = _expand_query(question)
+    query_stems = _query_stem_sequence(question)
+    query_bigrams = set(zip(query_stems, query_stems[1:]))
     if not query_terms:
         return [(0.0, record) for record in records]
 
@@ -262,7 +377,7 @@ def rank_pages(records: Iterable[object], question: str, /) -> list[tuple[float,
     }
 
     scored: list[tuple[float, object]] = []
-    for record, page in zip(records, stemmed_pages):
+    for record, page, body in zip(records, stemmed_pages, bodies):
         term_frequency = Counter(page)
         page_length = len(page)
         score = 0.0
@@ -272,6 +387,11 @@ def rank_pages(records: Iterable[object], question: str, /) -> list[tuple[float,
                 continue
             denominator = count + 1.2 * (0.25 + 0.75 * page_length / average_length)
             score += weight * idf[term] * (count * 2.2 / denominator)
+        page_bigrams = set(zip(page, page[1:]))
+        for bigram in query_bigrams:
+            if bigram in page_bigrams:
+                score += _BIGRAM_WEIGHT * (idf.get(bigram[0], 0.0) + idf.get(bigram[1], 0.0))
+        score += _statement_boost(question, body[:300])
         scored.append((score, record))
 
     scored.sort(key=lambda pair: (-pair[0], getattr(pair[1].entry, "entry_id", "")))
