@@ -344,6 +344,53 @@ def _statement_boost(question: str, page_head: str) -> float:
     return best
 
 
+# Flat score added to every page of the document a question explicitly names.
+# The evidence entries store ``DOCUMENT_ID\nPAGE_TEXT``, so a scoped Memory may
+# hold several reports at once; naming the target report must push all of its
+# pages above every other report's pages while leaving their internal BM25
+# order untouched. BM25/statement scores stay well below this bound.
+_DOCUMENT_BOOST = 1000.0
+
+
+def _entry_document_id(text: str) -> str:
+    """Return the ``DOCUMENT_ID`` prefix of a page's stored evidence text."""
+
+    if "\n" in text:
+        return text.partition("\n")[0]
+    return ""
+
+
+def _detect_target_documents(question: str, document_ids: Iterable[str]) -> set[str]:
+    """Return the documents whose company prefix the question explicitly names.
+
+    ``document_id`` prefixes are company identifiers (``PEPSICO_2022_10K``,
+    ``3M_2022_10K``, ...). A question like ``... for 3M`` must match the ``3M``
+    report even though the tokenizer would split ``3M`` into a bare ``3``; the
+    prefix is matched case-insensitively as a whole word, tolerating a trailing
+    ``'s``. Longer prefixes are matched as normalized substrings so names such
+    as ``American Water Works`` still match ``AMERICANWATERWORKS``.
+    """
+
+    normalized_question = re.sub(r"[^a-z0-9]", "", question.lower())
+    raw_question = question.lower()
+    targets: set[str] = set()
+    for document_id in document_ids:
+        if not document_id:
+            continue
+        key = document_id.split("_", 1)[0].lower()
+        normalized_key = re.sub(r"[^a-z0-9]", "", key)
+        if not normalized_key:
+            continue
+        if len(normalized_key) >= 4:
+            if normalized_key in normalized_question:
+                targets.add(document_id)
+        else:
+            pattern = r"(?<![a-z0-9])" + re.escape(key) + r"(?:'s)?(?![a-z0-9])"
+            if re.search(pattern, raw_question):
+                targets.add(document_id)
+    return targets
+
+
 def rank_pages(records: Iterable[object], question: str, /) -> list[tuple[float, object]]:
     """Rank Memory entry records by BM25 relevance to ``question``.
 
@@ -362,6 +409,8 @@ def rank_pages(records: Iterable[object], question: str, /) -> list[tuple[float,
         return [(0.0, record) for record in records]
 
     bodies = [_page_body(record.entry.text) for record in records]
+    entry_documents = [_entry_document_id(record.entry.text) for record in records]
+    target_documents = _detect_target_documents(question, {doc for doc in entry_documents if doc})
     stemmed_pages = [[_porter_stem(token) for token in _tokenize(body)] for body in bodies]
 
     document_count = len(stemmed_pages)
@@ -377,7 +426,7 @@ def rank_pages(records: Iterable[object], question: str, /) -> list[tuple[float,
     }
 
     scored: list[tuple[float, object]] = []
-    for record, page, body in zip(records, stemmed_pages, bodies):
+    for record, page, body, document_id in zip(records, stemmed_pages, bodies, entry_documents):
         term_frequency = Counter(page)
         page_length = len(page)
         score = 0.0
@@ -392,6 +441,8 @@ def rank_pages(records: Iterable[object], question: str, /) -> list[tuple[float,
             if bigram in page_bigrams:
                 score += _BIGRAM_WEIGHT * (idf.get(bigram[0], 0.0) + idf.get(bigram[1], 0.0))
         score += _statement_boost(question, body[:300])
+        if document_id in target_documents:
+            score += _DOCUMENT_BOOST
         scored.append((score, record))
 
     scored.sort(key=lambda pair: (-pair[0], getattr(pair[1].entry, "entry_id", "")))
