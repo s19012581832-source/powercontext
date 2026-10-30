@@ -1,0 +1,11 @@
+# 运行生成的数据库与日志，不入库
+*.db
+*.db-journal
+**/__pycache__/
+*.pyc
+verification/evidence/*.txt
+pip_install.log
+pc_install.log
+pc_pip.log
+venv/
+.venv/

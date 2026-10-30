@@ -1,0 +1,540 @@
+app:
+  description: '《江湖·记忆》—— 会记住你的武侠文字冒险。\n\n使用 Dify 编排核心流程，结合 OceanBase seekdb（武侠世界观设定检索）与 PowerContext（跨会话玩家记忆）。\n玩家用一句话描述行动（如"我去后山练剑，遇见一只白猿"），AI 说书人据此续写越聊越离奇的武侠冒险；\nseekdb 负责检索门派/武功/桥段/NPC 设定以保证世界观一致，PowerContext 让 NPC 在新会话里依然记得你上次干的事。\n\n技术分工：\n- Dify：输入处理、模型调用、工具调用、条件判断与结果输出（核心编排）\n- seekdb：应用功能层，承担"武侠世界观设定库"的向量+全文混合检索（横向世界知识）\n- PowerContext：应用功能层，承担"玩家角色卡与剧情进度"的跨会话记忆（纵向玩家状态）'
+  icon: sword
+  icon_background: '#FFEAD5'
+  mode: advanced-chat
+  name: 江湖记忆
+  use_icon_as_answer_icon: true
+kind: app
+version: 0.1.5
+workflow:
+  conversation_variables:
+  - description: 玩家标识，用于隔离不同玩家的跨会话记忆（PowerContext scope）。默认演示玩家，可改为任意唯一值。
+    id: 7f3c1a9e-0001-4a2b-8c11-000000000001
+    name: player_id
+    selector:
+    - conversation
+    - player_id
+    value: demo-player-001
+    value_type: string
+  environment_variables:
+  - description: PowerContext 服务地址
+    id: 7f3c1a9e-0002-4a2b-8c11-000000000002
+    name: PC_URL
+    selector:
+    - env
+    - PC_URL
+    value: http://127.0.0.1:8000
+    value_type: string
+  - description: seekdb 网关服务地址
+    id: 7f3c1a9e-0003-4a2b-8c11-000000000003
+    name: SEEKDB_URL
+    selector:
+    - env
+    - SEEKDB_URL
+    value: http://127.0.0.1:8001
+    value_type: string
+  - description: PowerContext 鉴权 Token（本地默认无鉴权可留空；启用服务端鉴权后填入 Bearer Token）
+    id: 7f3c1a9e-0004-4a2b-8c11-000000000004
+    name: PC_TOKEN
+    selector:
+    - env
+    - PC_TOKEN
+    value: ''
+    value_type: secret
+  features:
+    file_upload:
+      allowed_file_extensions: []
+      allowed_file_types: []
+      allowed_file_upload_methods:
+      - local_file
+      - remote_url
+      enabled: false
+      fileUploadConfig:
+        audio_file_size_limit: 50
+        batch_count_limit: 5
+        file_size_limit: 15
+        image_file_size_limit: 10
+        video_file_size_limit: 100
+        workflow_file_upload_limit: 10
+      image:
+        enabled: false
+        number_limits: 3
+        transfer_methods:
+        - local_file
+        - remote_url
+      number_limits: 3
+    opening_statement: '<center><font size=4>《江湖·记忆》</font></center>\n\n      <div><font size=2>你是一名初入江湖的少侠。用一句话描述你的行动或选择，AI 说书人会据此续写属于你的武侠冒险。</font></div>\n\n      <div><font size=2>例：「我去后山练剑，遇见一只白猿」「我偷了少林掌门的玉佩」「酒楼里有个陌生人向我搭话」</font></div>\n\n      <div><font size=2>提示：本游戏会记住你——换一个新对话，NPC 仍会记得你曾做过的事。</font></div>'
+    retriever_resource:
+      enabled: true
+    sensitive_word_avoidance:
+      configs: []
+      enabled: false
+      type: ''
+    speech_to_text:
+      enabled: false
+    suggested_questions:
+    - 我去后山练剑，遇见一只白猿
+    - 我走进热闹的江湖酒楼
+    - 我偷了少林掌门的玉佩
+    suggested_questions_after_answer:
+      enabled: false
+    text_to_speech:
+      enabled: false
+      language: ''
+      voice: ''
+  graph:
+    edges:
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: start
+        targetType: http-request
+      id: start-source-1001-target
+      selected: false
+      source: start
+      sourceHandle: source
+      target: '1001'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: http-request
+        targetType: code
+      id: '1001-source-1002-target'
+      selected: false
+      source: '1001'
+      sourceHandle: source
+      target: '1002'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: code
+        targetType: http-request
+      id: '1002-source-1003-target'
+      selected: false
+      source: '1002'
+      sourceHandle: source
+      target: '1003'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: http-request
+        targetType: http-request
+      id: '1003-source-1004-target'
+      selected: false
+      source: '1003'
+      sourceHandle: source
+      target: '1004'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: http-request
+        targetType: http-request
+      id: '1004-source-1005-target'
+      selected: false
+      source: '1004'
+      sourceHandle: source
+      target: '1005'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: http-request
+        targetType: llm
+      id: '1005-source-1006-target'
+      selected: false
+      source: '1005'
+      sourceHandle: source
+      target: '1006'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: llm
+        targetType: http-request
+      id: '1006-source-1007-target'
+      selected: false
+      source: '1006'
+      sourceHandle: source
+      target: '1007'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: http-request
+        targetType: answer
+      id: '1007-source-1008-target'
+      selected: false
+      source: '1007'
+      sourceHandle: source
+      target: '1008'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    nodes:
+    - data:
+        selected: false
+        title: START
+        type: start
+        variables: []
+      height: 52
+      id: start
+      position:
+        x: 30
+        y: 300
+      positionAbsolute:
+        x: 30
+        y: 300
+      selected: false
+      type: custom
+      width: 242
+    - data:
+        authorization:
+          config: null
+          type: no-auth
+        body:
+          data:
+          - key: title
+            type: mixed
+            value: 江湖记忆-玩家
+          - key: summary
+            type: mixed
+            value: 玩家角色卡与剧情进度
+          - key: idempotency_key
+            type: mixed
+            value: '{{#conversation.player_id#}}'
+          type: json
+        desc: ''
+        headers: 'Content-Type: application/json'
+        method: post
+        retry_config:
+          max_retries: 3
+          retry_enabled: true
+          retry_interval: 100
+        timeout:
+          max_connect_timeout: 0
+          max_read_timeout: 0
+          max_write_timeout: 0
+        title: 创建/获取玩家记忆空间
+        type: http-request
+        url: '{{#env.PC_URL#}}/v1/scopes'
+        variables: []
+      height: 119
+      id: '1001'
+      position:
+        x: 340
+        y: 300
+      positionAbsolute:
+        x: 340
+        y: 300
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        code: "import json\n\ndef main(body: str) -> dict:\n    try:\n        return {'scope_id':\
+          \ json.loads(body).get('scope_id', '')}\n    except Exception:\n        return\
+          \ {'scope_id': ''}\n"
+        code_language: python3
+        desc: ''
+        outputs:
+          scope_id:
+            children: null
+            type: string
+        selected: false
+        title: 提取scope_id
+        type: code
+        variables:
+        - value_selector:
+          - '1001'
+          - body
+          variable: body
+      height: 53
+      id: '1002'
+      position:
+        x: 640
+        y: 300
+      positionAbsolute:
+        x: 640
+        y: 300
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        authorization:
+          config: null
+          type: no-auth
+        body:
+          data:
+          - key: scope_id
+            type: mixed
+            value: '{{#1002.scope_id#}}'
+          - key: query
+            type: mixed
+            value: '{{#sys.query#}}'
+          - key: max_bytes
+            type: number
+            value: 4000
+          type: json
+        desc: ''
+        headers: 'Content-Type: application/json'
+        method: post
+        retry_config:
+          max_retries: 3
+          retry_enabled: true
+          retry_interval: 100
+        timeout:
+          max_connect_timeout: 0
+          max_read_timeout: 0
+          max_write_timeout: 0
+        title: 召回玩家记忆
+        type: http-request
+        url: '{{#env.PC_URL#}}/v1/context/prepare'
+        variables: []
+      height: 119
+      id: '1003'
+      position:
+        x: 940
+        y: 300
+      positionAbsolute:
+        x: 940
+        y: 300
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        authorization:
+          config: null
+          type: no-auth
+        body:
+          data:
+          - key: query
+            type: mixed
+            value: '{{#sys.query#}}'
+          - key: n_results
+            type: number
+            value: 2
+          type: json
+        desc: ''
+        headers: 'Content-Type: application/json'
+        method: post
+        retry_config:
+          max_retries: 3
+          retry_enabled: true
+          retry_interval: 100
+        timeout:
+          max_connect_timeout: 0
+          max_read_timeout: 0
+          max_write_timeout: 0
+        title: seekdb-桥段素材匹配
+        type: http-request
+        url: '{{#env.SEEKDB_URL#}}/v1/seekdb/match_scene'
+        variables: []
+      height: 119
+      id: '1004'
+      position:
+        x: 1240
+        y: 250
+      positionAbsolute:
+        x: 1240
+        y: 250
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        authorization:
+          config: null
+          type: no-auth
+        body:
+          data:
+          - key: collection
+            type: mixed
+            value: skills
+          - key: query
+            type: mixed
+            value: '{{#sys.query#}}'
+          - key: n_results
+            type: number
+            value: 3
+          type: json
+        desc: ''
+        headers: 'Content-Type: application/json'
+        method: post
+        retry_config:
+          max_retries: 3
+          retry_enabled: true
+          retry_interval: 100
+        timeout:
+          max_connect_timeout: 0
+          max_read_timeout: 0
+          max_write_timeout: 0
+        title: seekdb-武学设定检索
+        type: http-request
+        url: '{{#env.SEEKDB_URL#}}/v1/seekdb/retrieve'
+        variables: []
+      height: 119
+      id: '1005'
+      position:
+        x: 1240
+        y: 420
+      positionAbsolute:
+        x: 1240
+        y: 420
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        context:
+          enabled: false
+          variable_selector: []
+        desc: ''
+        model:
+          completion_params:
+            temperature: 0.9
+          mode: chat
+          name: gpt-4o-mini
+          provider: openai
+        prompt_template:
+        - id: 7f3c1a9e-0010-4a2b-8c11-000000000010
+          role: system
+          text: '你是武侠文字冒险《江湖·记忆》的"江湖说书人"。你负责根据玩家的行动，续写一段有武侠味、有画面感、越聊越离奇的冒险剧情。\n\n你的写作要求：\n1. 文风半文半白、简洁有江湖气，多用短句与动作描写。\n2. 若下方"回忆"中提到了玩家过往做的事，必须自然地呼应（例如"你这偷玉佩的小贼，又回来了？"），让玩家感到你真的记得他。\n3. 若下方"相关桥段/武学设定"提供了素材，请合理融入剧情，保持世界观一致（门派、武功名称需一致）。\n4. 每次只续写一小段（200字以内），并在结尾抛出一个新的处境或选择，引导玩家继续。\n5. 不要替玩家做决定，只描述世界如何回应他的行动。'
+        - id: 7f3c1a9e-0011-4a2b-8c11-000000000011
+          role: user
+          text: '玩家编号：{{#player#}}\n玩家本回合的行动：{{#action#}}\n\n—— 来自过往会话的回忆（可能为空） ——\n{{#memory#}}\n\n—— 相关剧情桥段素材 ——\n{{#scene#}}\n\n—— 相关武学/门派设定 ——\n{{#entity#}}\n\n请以上述信息续写这一回合的江湖剧情，并在结尾抛出一个新的处境或选择。'
+        selected: false
+        title: 续写江湖剧情
+        type: llm
+        variables:
+        - value_selector:
+          - sys
+          - query
+          variable: action
+        - value_selector:
+          - '1003'
+          - body
+          variable: memory
+        - value_selector:
+          - '1004'
+          - body
+          variable: scene
+        - value_selector:
+          - '1005'
+          - body
+          variable: entity
+        - value_selector:
+          - conversation
+          - player_id
+          variable: player
+        vision:
+          enabled: false
+      height: 96
+      id: '1006'
+      position:
+        x: 1540
+        y: 330
+      positionAbsolute:
+        x: 1540
+        y: 330
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    - data:
+        authorization:
+          config: null
+          type: no-auth
+        body:
+          data:
+          - key: scope_id
+            type: mixed
+            value: '{{#1002.scope_id#}}'
+          - key: kind
+            type: mixed
+            value: decision
+          - key: text
+            type: mixed
+            value: '玩家[{{#conversation.player_id#}}]本回合行动：{{#sys.query#}}——说书人已据此续写剧情。'
+          - key: reason
+            type: mixed
+            value: 记录玩家行动以形成跨会话记忆
+          type: json
+        desc: ''
+        headers: 'Content-Type: application/json'
+        method: post
+        retry_config:
+          max_retries: 3
+          retry_enabled: true
+          retry_interval: 100
+        timeout:
+          max_connect_timeout: 0
+          max_read_timeout: 0
+          max_write_timeout: 0
+        title: 保存玩家记忆
+        type: http-request
+        url: '{{#env.PC_URL#}}/v1/memory/remember'
+        variables: []
+      height: 119
+      id: '1007'
+      position:
+        x: 1840
+        y: 330
+      positionAbsolute:
+        x: 1840
+        y: 330
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        answer: '{{#1006.text#}}'
+        desc: ''
+        selected: false
+        title: 输出剧情
+        type: answer
+        variables: []
+      height: 117
+      id: '1008'
+      position:
+        x: 2140
+        y: 330
+      positionAbsolute:
+        x: 2140
+        y: 330
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+    viewport:
+      x: 0
+      y: 0
+      zoom: 0.7
